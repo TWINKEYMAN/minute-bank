@@ -12,10 +12,10 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet" />
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <style>
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 body { margin: 0; background: #15171A; }
@@ -25,7 +25,15 @@ input::placeholder { color: #5f656c; }
 </style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root"><div style="color:#FFB81C;font-family:sans-serif;padding:40px 20px;font-size:18px;">Loading Minute Bank…<br><span style="color:#9aa0a6;font-size:14px;">If this doesn't go away in a few seconds, your connection may be blocking the app's libraries. Try WiFi or pull down to refresh.</span></div></div>
+<script>
+// Surface any load/runtime error instead of showing a blank screen
+window.addEventListener("error", function (e) {
+  var r = document.getElementById("root");
+  if (r) r.innerHTML = '<div style="color:#ff9ea2;font-family:sans-serif;padding:30px 20px;font-size:15px;line-height:1.5;">Something failed to load.<br><br><b>' +
+    (e.message || "Unknown error") + '</b><br><br><span style="color:#9aa0a6;">Usually this means a script (React, Babel, or the OCR engine) was blocked. Connect to WiFi and refresh. If it persists, screenshot this and send it over.</span></div>';
+});
+</script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef } = React;
 
@@ -227,7 +235,7 @@ async function getOcrWorker() {
 
 const MODEL_WORDS = ["OUTBACK", "FORESTER", "CROSSTREK", "IMPREZA", "WRX", "BRZ", "SOLTERRA", "ASCENT", "LEGACY"];
 
-async function extractSheetOCR(dataUrl, learned, onProgress) {
+async function extractSheetOCR(dataUrl, partList, onProgress) {
   _ocrProgress = onProgress;
   const worker = await getOcrWorker();
   const { data } = await worker.recognize(dataUrl);
@@ -247,40 +255,66 @@ async function extractSheetOCR(dataUrl, learned, onProgress) {
   // Model
   const model = MODEL_WORDS.find((w) => fullText.includes(w)) || "";
 
-  // Build canonical dictionary from seed + learned parts
+  // Build canonical dictionary from the editable catalog (parts only)
   const dict = {};
-  Object.entries(SEED_PARTS).forEach(([p, v]) => (dict[canonical(p)] = { part: p, ...v }));
-  Object.entries(learned || {}).forEach(([p, v]) => (dict[canonical(p)] = { part: p, ...v }));
+  (partList || []).forEach((c) => {
+    if (c.part) dict[canonical(c.part)] = { part: c.part, name: c.name, min: parseFloat(c.min) || 0 };
+  });
 
+  // Subaru part-number shapes — for catching parts not yet in the dictionary.
+  // We only trust the part number; descriptions from OCR are ignored entirely.
+  const PART_SHAPES = [
+    /^[A-Z]\d{3}[A-Z]{3}\d{3}$/, // J501SAR000, H505SAN000, E775SAR000, J205SAR100
+    /^[A-Z]\d{4}[A-Z]{2}\d{3}$/, // J2050FN001
+    /^MSA[A-Z0-9]{6,8}$/,        // MSA6A1602, MSA5M2604K
+  ];
+  const looksLikePart = (t) => PART_SHAPES.some((re) => re.test(t));
+
+  // Pull every token from the whole sheet and match on part number only.
+  const allTokens = fullText.match(/[A-Z0-9]{3,14}/g) || [];
   const items = [];
   const seen = new Set();
-  for (const line of lines) {
-    const tokens = line.match(/[A-Z0-9]{3,14}/g) || [];
-    for (const tok of tokens) {
-      const can = canonical(tok);
-      if (seen.has(can)) continue;
-      const lineDesc = line.replace(tok, "").replace(/[^A-Z0-9 \-\/&]/g, "").replace(/\s+/g, " ").trim();
-      if (dict[can]) {
-        seen.add(can);
-        items.push({ key: uid(), part: dict[can].part, desc: lineDesc, name: dict[can].name, min: dict[can].min, known: true, checked: true });
-      } else if (
-        /^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6,12}$/.test(tok) && // looks like a part number
-        !(vin && vin.includes(tok)) // not a chunk of the VIN
-      ) {
-        seen.add(can);
-        items.push({ key: uid(), part: tok, desc: lineDesc, name: lineDesc || tok, min: "", known: false, checked: false });
-      }
+  for (const tok of allTokens) {
+    const can = canonical(tok);
+    if (seen.has(can)) continue;
+    if (dict[can]) {
+      seen.add(can);
+      const d = dict[can];
+      items.push({ key: uid(), part: d.part, name: d.name, min: d.min, known: true, checked: true });
+    } else if (looksLikePart(tok) && !(vin && vin.includes(tok))) {
+      seen.add(can);
+      items.push({ key: uid(), part: tok, name: tok, min: "", known: false, checked: false });
     }
   }
   return { model, vin, items };
 }
 
+function migrate(d) {
+  if (!d.goal) d.goal = 440;
+  if (!d.days) d.days = {};
+  if (!Array.isArray(d.catalog)) {
+    // Build the editable catalog from the built-in list the first time.
+    d.catalog = CATALOG.map(([model, name, min, part]) => ({
+      id: uid(), model: model, name: name, min: min, part: part || "",
+    }));
+    // Fold in any parts taught during earlier scans so they show up here too.
+    if (d.learned) {
+      Object.entries(d.learned).forEach(([part, v]) => {
+        if (!d.catalog.some((c) => normPart(c.part) === normPart(part))) {
+          d.catalog.push({ id: uid(), model: "Outback", name: v.name || part, min: v.min, part: part });
+        }
+      });
+    }
+  }
+  return d;
+}
+
 function loadData() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) return migrate(JSON.parse(raw));
   } catch (e) {}
-  return { goal: 440, learned: {}, days: {} };
+  return migrate({ goal: 440, learned: {}, days: {} });
 }
 
 function MinuteBank() {
@@ -336,7 +370,7 @@ function MinuteBank() {
     setScanErr("");
     try {
       const dataUrl = await fileToDataUrl(file);
-      const result = await extractSheetOCR(dataUrl, data.learned, setScanProg);
+      const result = await extractSheetOCR(dataUrl, data.catalog, setScanProg);
       const vin = (result.vin || "").trim();
       const dupVin = !!vin && Object.values(data.days).some((d) => d.some((en) => en.vin === vin));
       const items = result.items;
@@ -352,12 +386,16 @@ function MinuteBank() {
   const confirmReview = () => {
     const picked = review.items.filter((i) => i.checked && i.min !== "" && !isNaN(parseFloat(i.min)));
     if (!picked.length) { setReview(null); return; }
-    const learned = { ...(data.learned || {}) };
+    const catalog = data.catalog.slice();
     picked.forEach((i) => {
-      const p = normPart(i.part);
-      if (!i.known && p) learned[p] = { name: i.name, min: parseFloat(i.min) };
+      if (!i.known && normPart(i.part)) {
+        const exists = catalog.some((c) => c.part && canonical(c.part) === canonical(i.part));
+        if (!exists) {
+          catalog.push({ id: uid(), model: review.model || "Outback", name: i.name || i.part, min: parseFloat(i.min), part: i.part });
+        }
+      }
     });
-    addEntriesWith({ ...data, learned }, picked.map((i) => ({
+    addEntriesWith({ ...data, catalog }, picked.map((i) => ({
       name: i.name, min: parseFloat(i.min), part: i.part, vin: review.vin || undefined,
     })));
     setReview(null);
@@ -366,10 +404,22 @@ function MinuteBank() {
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return CATALOG.filter(([cat, name]) =>
-      q ? name.toLowerCase().includes(q) || cat.toLowerCase().includes(q) : cat === model
+    return data.catalog.filter((c) =>
+      q ? (c.name || "").toLowerCase().includes(q) || (c.part || "").toLowerCase().includes(q) || (c.model || "").toLowerCase().includes(q) : c.model === model
     );
-  }, [search, model]);
+  }, [search, model, data.catalog]);
+
+  const updateCatalogItem = (id, field, value) =>
+    save({ ...data, catalog: data.catalog.map((c) => (c.id === id ? { ...c, [field]: value } : c)) });
+
+  const addCatalogItem = () =>
+    save({ ...data, catalog: [{ id: uid(), model: search ? "Outback" : model, name: "", part: "", min: "" }, ...data.catalog] });
+
+  const removeCatalogItem = (id, name) => {
+    if (window.confirm("Delete \"" + (name || "this install") + "\"? This only changes your list, not your logged minutes.")) {
+      save({ ...data, catalog: data.catalog.filter((c) => c.id !== id) });
+    }
+  };
 
   const exportCSV = () => {
     const rows = [["date", "time", "install", "part", "minutes"]];
@@ -395,12 +445,16 @@ function MinuteBank() {
           <div style={S.brand}>MINUTE BANK</div>
           <div style={S.sub}>{new Date().toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button style={S.iconBtn} onClick={() => setShowSettings(true)}>⚙</button>
-          <button style={S.iconBtn} onClick={() => setView(view === "main" ? "history" : "main")}>
-            {view === "main" ? "HISTORY" : "TODAY"}
+        <button style={S.iconBtn} onClick={() => setShowSettings(true)}>⚙</button>
+      </div>
+
+      {/* Nav */}
+      <div style={S.nav}>
+        {[["main", "TODAY"], ["history", "HISTORY"], ["manage", "INSTALLS"]].map(([v, label]) => (
+          <button key={v} style={{ ...S.navBtn, ...(view === v ? S.navOn : {}) }} onClick={() => setView(v)}>
+            {label}
           </button>
-        </div>
+        ))}
       </div>
 
       {view === "main" ? (
@@ -442,15 +496,19 @@ function MinuteBank() {
             </div>
           )}
           <div style={S.list}>
-            {filtered.map(([cat, name, min, part], i) => (
-              <button key={i} style={S.row} onClick={() => { addEntries([{ name, min, part }]); flash("+" + fmt(min) + " min — " + name); }}>
-                <span style={S.rowName}>
-                  {name}
-                  {search ? <span style={S.rowCat}> · {cat}</span> : null}
-                </span>
-                <span style={S.rowMin}>+{fmt(min)}</span>
-              </button>
-            ))}
+            {filtered.map((c) => {
+              const cm = parseFloat(c.min) || 0;
+              return (
+                <button key={c.id} style={S.row} onClick={() => { addEntries([{ name: c.name, min: cm, part: c.part }]); flash("+" + fmt(cm) + " min — " + c.name); }}>
+                  <span style={S.rowName}>
+                    {c.name}
+                    {search ? <span style={S.rowCat}> · {c.model}</span> : null}
+                  </span>
+                  <span style={S.rowMin}>+{fmt(cm)}</span>
+                </button>
+              );
+            })}
+            {filtered.length === 0 && <div style={S.empty}>No installs here yet. Add some in the Installs tab.</div>}
           </div>
 
           <div style={S.section}>TODAY'S LOG ({entries.length})</div>
@@ -474,7 +532,7 @@ function MinuteBank() {
             </div>
           )}
         </React.Fragment>
-      ) : (
+      ) : view === "history" ? (
         <React.Fragment>
           <div style={S.section}>DAILY HISTORY</div>
           <div style={S.list}>
@@ -505,6 +563,54 @@ function MinuteBank() {
             ⬇ EXPORT FULL LOG (CSV)
           </button>
           <div style={S.logMeta}>Keep the CSV as your own paper trail — proof of your numbers if they're ever questioned.</div>
+        </React.Fragment>
+      ) : (
+        <React.Fragment>
+          <div style={S.section}>MANAGE INSTALLS</div>
+          <button style={{ ...S.scanBtn, fontSize: 17 }} onClick={addCatalogItem}>+ ADD INSTALL</button>
+          <input style={S.search} placeholder="Search installs…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {!search && (
+            <div style={S.chips}>
+              {MODELS.map((m) => (
+                <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)}>
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={S.logMeta}>
+            Edit any name, part number, or minute value below — changes apply to both scanning and quick-add. Verify your minutes here so banked totals stay accurate.
+          </div>
+          <div style={{ ...S.list, marginTop: 8 }}>
+            {filtered.map((c) => (
+              <div key={c.id} style={S.editCard}>
+                <input
+                  style={S.editName}
+                  placeholder="Install name"
+                  value={c.name}
+                  onChange={(e) => updateCatalogItem(c.id, "name", e.target.value)}
+                />
+                <div style={S.editRow}>
+                  <input
+                    style={S.editPart}
+                    placeholder="Part # (optional)"
+                    value={c.part}
+                    onChange={(e) => updateCatalogItem(c.id, "part", e.target.value.toUpperCase())}
+                  />
+                  <input
+                    style={S.editMin}
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="min"
+                    value={c.min}
+                    onChange={(e) => updateCatalogItem(c.id, "min", e.target.value)}
+                  />
+                  <button style={S.delBox} onClick={() => removeCatalogItem(c.id, c.name)}>✕</button>
+                </div>
+              </div>
+            ))}
+            {filtered.length === 0 && <div style={S.empty}>No installs here. Tap “+ Add Install” to create one.</div>}
+          </div>
         </React.Fragment>
       )}
 
@@ -560,8 +666,8 @@ function MinuteBank() {
                     {it.checked ? "✓" : ""}
                   </button>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={S.rowName}>{it.desc || it.name}</div>
-                    <div style={S.logMeta}>{it.part}</div>
+                    <div style={S.rowName}>{it.known ? it.name : it.part}</div>
+                    <div style={S.logMeta}>{it.known ? it.part : "New part — set minutes once"}</div>
                   </div>
                   {it.known ? (
                     <span style={S.rowMin}>+{fmt(it.min)}</span>
@@ -611,6 +717,15 @@ const S = {
   brand: { fontFamily: F.disp, fontWeight: 700, fontSize: 24, letterSpacing: 3, color: "#F2F0EB" },
   sub: { fontSize: 12, color: "#9aa0a6", marginTop: 2 },
   iconBtn: { fontFamily: F.disp, letterSpacing: 2, fontSize: 13, fontWeight: 600, background: "transparent", border: "1px solid #3a3f45", color: "#9aa0a6", borderRadius: 6, padding: "8px 12px" },
+  nav: { display: "flex", gap: 6, marginBottom: 14 },
+  navBtn: { flex: 1, fontFamily: F.disp, fontWeight: 700, letterSpacing: 2, fontSize: 15, background: "#1F2226", border: "1px solid #2c3036", color: "#9aa0a6", borderRadius: 8, padding: "10px 0" },
+  navOn: { background: "#FFB81C", color: "#15171A", borderColor: "#FFB81C" },
+  editCard: { background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 },
+  editRow: { display: "flex", gap: 8, alignItems: "stretch" },
+  editName: { width: "100%", background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#F2F0EB", padding: "10px 12px", fontSize: 15, outline: "none" },
+  editPart: { flex: 1, minWidth: 0, background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#9aa0a6", padding: "10px 12px", fontSize: 14, fontFamily: F.disp, letterSpacing: 1, outline: "none" },
+  editMin: { width: 64, background: "#15171A", border: "1px solid #FFB81C", borderRadius: 6, color: "#FFB81C", fontFamily: F.disp, fontWeight: 700, fontSize: 17, padding: "10px 6px", textAlign: "center", outline: "none" },
+  delBox: { width: 44, background: "transparent", border: "1px solid #3a3f45", color: "#ff9ea2", fontSize: 16, borderRadius: 6 },
   board: { background: "#1F2226", border: "1px solid #2c3036", borderRadius: 10, padding: "18px 16px 14px", marginBottom: 14 },
   bigRow: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 },
   bigNum: { fontFamily: F.disp, fontWeight: 700, fontSize: 64, lineHeight: 1, letterSpacing: 1 },
