@@ -295,16 +295,24 @@ function migrate(d) {
   if (!Array.isArray(d.catalog)) {
     // Build the editable catalog from the built-in list the first time.
     d.catalog = CATALOG.map(([model, name, min, part]) => ({
-      id: uid(), model: model, name: name, min: min, part: part || "",
+      id: uid(), model: model, name: name, min: min, part: part || "", actual: "",
     }));
     // Fold in any parts taught during earlier scans so they show up here too.
     if (d.learned) {
       Object.entries(d.learned).forEach(([part, v]) => {
         if (!d.catalog.some((c) => normPart(c.part) === normPart(part))) {
-          d.catalog.push({ id: uid(), model: "Outback", name: v.name || part, min: v.min, part: part });
+          d.catalog.push({ id: uid(), model: "Outback", name: v.name || part, min: v.min, part: part, actual: "" });
         }
       });
     }
+  }
+  // Ensure every catalog item has an actual-minutes field
+  d.catalog.forEach((c) => { if (c.actual === undefined) c.actual = ""; });
+  // Editable model list — seed from whatever models the catalog already uses, in MODELS order
+  if (!Array.isArray(d.models)) {
+    const used = Array.from(new Set(d.catalog.map((c) => c.model)));
+    d.models = MODELS.filter((m) => used.includes(m)).concat(used.filter((m) => !MODELS.includes(m)));
+    if (!d.models.length) d.models = MODELS.slice();
   }
   return d;
 }
@@ -319,7 +327,8 @@ function loadData() {
 
 function MinuteBank() {
   const [data, setData] = useState(loadData);
-  const [view, setView] = useState("main");
+  const [space, setSpace] = useState("tracker"); // tracker | pace | installs
+  const [trackerView, setTrackerView] = useState("today"); // today | history
   const [showSettings, setShowSettings] = useState(false);
   const [search, setSearch] = useState("");
   const [model, setModel] = useState("Outback");
@@ -328,7 +337,19 @@ function MinuteBank() {
   const [scanErr, setScanErr] = useState("");
   const [review, setReview] = useState(null);
   const [toast, setToast] = useState("");
+  // Pace state
+  const [openModel, setOpenModel] = useState(null);
+  const [openInstall, setOpenInstall] = useState(null);
+  const [timer, setTimer] = useState(null); // { id, startedAt }
+  const [now, setNow] = useState(Date.now());
   const fileRef = useRef(null);
+
+  // Stopwatch ticker — only runs while a timer is active
+  useEffect(() => {
+    if (!timer) return;
+    const iv = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(iv);
+  }, [timer]);
 
   const save = (next) => {
     setData(next);
@@ -421,6 +442,53 @@ function MinuteBank() {
     }
   };
 
+  // ----- Model management (lives in INSTALLS) -----
+  const addModel = () => {
+    const name = (window.prompt("New model name:") || "").trim();
+    if (!name) return;
+    if (data.models.some((m) => m.toLowerCase() === name.toLowerCase())) { flash("That model already exists"); return; }
+    save({ ...data, models: [...data.models, name] });
+    setModel(name);
+  };
+  const renameModel = (oldName) => {
+    const name = (window.prompt("Rename \"" + oldName + "\" to:", oldName) || "").trim();
+    if (!name || name === oldName) return;
+    if (data.models.some((m) => m.toLowerCase() === name.toLowerCase())) { flash("That model already exists"); return; }
+    save({
+      ...data,
+      models: data.models.map((m) => (m === oldName ? name : m)),
+      catalog: data.catalog.map((c) => (c.model === oldName ? { ...c, model: name } : c)),
+    });
+    if (model === oldName) setModel(name);
+  };
+  const removeModel = (name) => {
+    const count = data.catalog.filter((c) => c.model === name).length;
+    if (count > 0) { window.alert("Can't delete \"" + name + "\" — it still has " + count + " install(s). Move or delete those first."); return; }
+    if (window.confirm("Delete model \"" + name + "\"?")) {
+      const models = data.models.filter((m) => m !== name);
+      save({ ...data, models });
+      if (model === name) setModel(models[0] || "");
+    }
+  };
+
+  // ----- Pace / stopwatch -----
+  const setActual = (id, value) =>
+    save({ ...data, catalog: data.catalog.map((c) => (c.id === id ? { ...c, actual: value } : c)) });
+
+  const toggleTimer = (item) => {
+    if (timer && timer.id === item.id) {
+      // stop & overwrite actual
+      const mins = (Date.now() - timer.startedAt) / 60000;
+      setActual(item.id, Math.round(mins * 10) / 10);
+      setTimer(null);
+      flash("Recorded " + fmt(Math.round(mins * 10) / 10) + " min for " + item.name);
+    } else {
+      setTimer({ id: item.id, startedAt: Date.now() });
+      setNow(Date.now());
+    }
+  };
+  const elapsedMin = (id) => (timer && timer.id === id ? (now - timer.startedAt) / 60000 : 0);
+
   const exportCSV = () => {
     const rows = [["date", "time", "install", "part", "minutes"]];
     Object.keys(data.days).sort().forEach((d) =>
@@ -445,19 +513,29 @@ function MinuteBank() {
           <div style={S.brand}>MINUTE BANK</div>
           <div style={S.sub}>{new Date().toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div>
         </div>
-        <button style={S.iconBtn} onClick={() => setShowSettings(true)}>⚙</button>
+        {space === "tracker" && <button style={S.iconBtn} onClick={() => setShowSettings(true)}>⚙</button>}
       </div>
 
-      {/* Nav */}
+      {/* Top-level nav */}
       <div style={S.nav}>
-        {[["main", "TODAY"], ["history", "HISTORY"], ["manage", "INSTALLS"]].map(([v, label]) => (
-          <button key={v} style={{ ...S.navBtn, ...(view === v ? S.navOn : {}) }} onClick={() => setView(v)}>
+        {[["tracker", "TRACKER"], ["pace", "PACE"], ["installs", "INSTALLS"]].map(([v, label]) => (
+          <button key={v} style={{ ...S.navBtn, ...(space === v ? S.navOn : {}) }} onClick={() => setSpace(v)}>
             {label}
           </button>
         ))}
       </div>
 
-      {view === "main" ? (
+      {space === "tracker" && (
+        <div style={S.subnav}>
+          {[["today", "TODAY"], ["history", "HISTORY"]].map(([v, label]) => (
+            <button key={v} style={{ ...S.subBtn, ...(trackerView === v ? S.subOn : {}) }} onClick={() => setTrackerView(v)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {space === "tracker" && trackerView === "today" ? (
         <React.Fragment>
           <div style={S.board}>
             <div style={S.bigRow}>
@@ -488,7 +566,7 @@ function MinuteBank() {
           <input style={S.search} placeholder="Search installs…" value={search} onChange={(e) => setSearch(e.target.value)} />
           {!search && (
             <div style={S.chips}>
-              {MODELS.map((m) => (
+              {data.models.map((m) => (
                 <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)}>
                   {m}
                 </button>
@@ -532,7 +610,7 @@ function MinuteBank() {
             </div>
           )}
         </React.Fragment>
-      ) : view === "history" ? (
+      ) : space === "tracker" && trackerView === "history" ? (
         <React.Fragment>
           <div style={S.section}>DAILY HISTORY</div>
           <div style={S.list}>
@@ -564,22 +642,27 @@ function MinuteBank() {
           </button>
           <div style={S.logMeta}>Keep the CSV as your own paper trail — proof of your numbers if they're ever questioned.</div>
         </React.Fragment>
-      ) : (
+      ) : space === "installs" ? (
         <React.Fragment>
-          <div style={S.section}>MANAGE INSTALLS</div>
+          <div style={S.section}>MODELS</div>
+          <div style={S.chips}>
+            {data.models.map((m) => (
+              <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)} onDoubleClick={() => renameModel(m)}>
+                {m}
+              </button>
+            ))}
+            <button style={{ ...S.chip, borderStyle: "dashed", color: "#FFB81C" }} onClick={addModel}>+ MODEL</button>
+          </div>
+          <div style={S.modelTools}>
+            <button style={S.smallBtn} onClick={() => renameModel(model)}>Rename “{model}”</button>
+            <button style={{ ...S.smallBtn, color: "#ff9ea2", borderColor: "#5a3034" }} onClick={() => removeModel(model)}>Delete model</button>
+          </div>
+
+          <div style={S.section}>{model.toUpperCase()} INSTALLS</div>
           <button style={{ ...S.scanBtn, fontSize: 17 }} onClick={addCatalogItem}>+ ADD INSTALL</button>
-          <input style={S.search} placeholder="Search installs…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          {!search && (
-            <div style={S.chips}>
-              {MODELS.map((m) => (
-                <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)}>
-                  {m}
-                </button>
-              ))}
-            </div>
-          )}
+          <input style={S.search} placeholder="Search all installs…" value={search} onChange={(e) => setSearch(e.target.value)} />
           <div style={S.logMeta}>
-            Edit any name, part number, or minute value below — changes apply to both scanning and quick-add. Verify your minutes here so banked totals stay accurate.
+            Name, part number, minutes given, and your actual minutes. Changes here feed both Tracker and Pace. “Actual” can also be set by the stopwatch in Pace.
           </div>
           <div style={{ ...S.list, marginTop: 8 }}>
             {filtered.map((c) => (
@@ -597,19 +680,117 @@ function MinuteBank() {
                     value={c.part}
                     onChange={(e) => updateCatalogItem(c.id, "part", e.target.value.toUpperCase())}
                   />
-                  <input
-                    style={S.editMin}
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="min"
-                    value={c.min}
-                    onChange={(e) => updateCatalogItem(c.id, "min", e.target.value)}
-                  />
                   <button style={S.delBox} onClick={() => removeCatalogItem(c.id, c.name)}>✕</button>
+                </div>
+                <div style={S.editRow}>
+                  <div style={S.fieldWrap}>
+                    <span style={S.fieldLbl}>GIVEN</span>
+                    <input
+                      style={S.editMin}
+                      type="text" inputMode="decimal" placeholder="min"
+                      value={c.min}
+                      onChange={(e) => updateCatalogItem(c.id, "min", e.target.value)}
+                    />
+                  </div>
+                  <div style={S.fieldWrap}>
+                    <span style={S.fieldLbl}>ACTUAL</span>
+                    <input
+                      style={{ ...S.editMin, borderColor: "#3a3f45", color: "#F2F0EB" }}
+                      type="text" inputMode="decimal" placeholder="—"
+                      value={c.actual}
+                      onChange={(e) => updateCatalogItem(c.id, "actual", e.target.value)}
+                    />
+                  </div>
                 </div>
               </div>
             ))}
             {filtered.length === 0 && <div style={S.empty}>No installs here. Tap “+ Add Install” to create one.</div>}
+          </div>
+        </React.Fragment>
+      ) : (
+        /* ---------- PACE ---------- */
+        <React.Fragment>
+          <div style={S.section}>PACE — YOUR SPEED VS. STANDARD</div>
+          <div style={S.list}>
+            {data.models.map((m) => {
+              const installs = data.catalog.filter((c) => c.model === m);
+              const isOpen = openModel === m;
+              return (
+                <div key={m}>
+                  <button style={{ ...S.modelRow, ...(isOpen ? S.modelRowOpen : {}) }} onClick={() => { setOpenModel(isOpen ? null : m); setOpenInstall(null); }}>
+                    <span>{m}</span>
+                    <span style={S.modelCount}>{installs.length} {isOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {isOpen && (
+                    <div style={S.dropWrap}>
+                      {installs.length === 0 && <div style={S.empty}>No installs for {m} yet.</div>}
+                      {installs.map((c) => {
+                        const given = parseFloat(c.min) || 0;
+                        const running = timer && timer.id === c.id;
+                        const actual = running ? elapsedMin(c.id) : (parseFloat(c.actual) || 0);
+                        const hasActual = running || (c.actual !== "" && !isNaN(parseFloat(c.actual)));
+                        const diff = Math.round((given - actual) * 10) / 10;
+                        const detailOpen = openInstall === c.id;
+                        const maxBar = Math.max(given, actual, 1);
+                        return (
+                          <div key={c.id} style={S.paceItem}>
+                            <button style={S.paceHead} onClick={() => setOpenInstall(detailOpen ? null : c.id)}>
+                              <span style={S.rowName}>{c.name}</span>
+                              <span style={{ ...S.rowMin, color: !hasActual ? "#5f656c" : diff >= 0 ? "#57C271" : "#E5484D" }}>
+                                {hasActual ? (diff >= 0 ? "+" : "") + fmt(diff) : "—"}
+                              </span>
+                            </button>
+                            {detailOpen && (
+                              <div style={S.paceDetail}>
+                                <div style={S.paceMeta}>{c.part || "no part #"} · given {fmt(given)} min</div>
+                                {/* Two-bar graph */}
+                                <div style={S.barRow}>
+                                  <div style={S.barCol}>
+                                    <div style={S.barTrack}>
+                                      <div style={{ ...S.bar, height: (given / maxBar) * 100 + "%", background: "#FFB81C" }} />
+                                    </div>
+                                    <span style={S.barLbl}>GIVEN</span>
+                                    <span style={S.barVal}>{fmt(given)}</span>
+                                  </div>
+                                  <div style={S.barCol}>
+                                    <div style={S.barTrack}>
+                                      <div style={{ ...S.bar, height: (actual / maxBar) * 100 + "%", background: running ? "#7aa2ff" : diff >= 0 ? "#57C271" : "#E5484D" }} />
+                                    </div>
+                                    <span style={S.barLbl}>ACTUAL</span>
+                                    <span style={S.barVal}>{hasActual ? fmt(Math.round(actual * 10) / 10) : "—"}</span>
+                                  </div>
+                                </div>
+                                {hasActual && !running && (
+                                  <div style={{ ...S.paceVerdict, color: diff >= 0 ? "#57C271" : "#E5484D" }}>
+                                    {diff >= 0 ? "+" + fmt(diff) + " min ahead — that's gravy" : fmt(Math.abs(diff)) + " min behind standard"}
+                                  </div>
+                                )}
+                                {/* Stopwatch + manual */}
+                                <div style={S.swRow}>
+                                  <button style={{ ...S.swBtn, background: running ? "#E5484D" : "#FFB81C" }} onClick={() => toggleTimer(c)}>
+                                    {running ? "STOP " + fmt(Math.round(elapsedMin(c.id) * 10) / 10) : "▶ START TIMER"}
+                                  </button>
+                                  <div style={S.fieldWrap}>
+                                    <span style={S.fieldLbl}>SET MIN</span>
+                                    <input
+                                      style={{ ...S.editMin, borderColor: "#3a3f45", color: "#F2F0EB" }}
+                                      type="text" inputMode="decimal" placeholder="—"
+                                      value={c.actual}
+                                      onChange={(e) => setActual(c.id, e.target.value)}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {data.models.length === 0 && <div style={S.empty}>Add a model in the Installs tab to get started.</div>}
           </div>
         </React.Fragment>
       )}
@@ -718,13 +899,37 @@ const S = {
   sub: { fontSize: 12, color: "#9aa0a6", marginTop: 2 },
   iconBtn: { fontFamily: F.disp, letterSpacing: 2, fontSize: 13, fontWeight: 600, background: "transparent", border: "1px solid #3a3f45", color: "#9aa0a6", borderRadius: 6, padding: "8px 12px" },
   nav: { display: "flex", gap: 6, marginBottom: 14 },
-  navBtn: { flex: 1, fontFamily: F.disp, fontWeight: 700, letterSpacing: 2, fontSize: 15, background: "#1F2226", border: "1px solid #2c3036", color: "#9aa0a6", borderRadius: 8, padding: "10px 0" },
+  navBtn: { flex: 1, fontFamily: F.disp, fontWeight: 700, letterSpacing: 2, fontSize: 15, background: "#1F2226", borderWidth: 1, borderStyle: "solid", borderColor: "#2c3036", color: "#9aa0a6", borderRadius: 8, padding: "10px 0" },
   navOn: { background: "#FFB81C", color: "#15171A", borderColor: "#FFB81C" },
+  subnav: { display: "flex", gap: 6, marginBottom: 14 },
+  subBtn: { flex: 1, fontFamily: F.disp, fontWeight: 600, letterSpacing: 2, fontSize: 13, background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: "#2c3036", color: "#9aa0a6", borderRadius: 6, padding: "7px 0" },
+  subOn: { background: "#2A2E33", color: "#F2F0EB", borderColor: "#3a3f45" },
+  modelTools: { display: "flex", gap: 8, marginTop: 8 },
+  smallBtn: { flex: 1, fontFamily: F.body, fontSize: 13, background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: "#3a3f45", color: "#9aa0a6", borderRadius: 6, padding: "8px" },
+  fieldWrap: { display: "flex", flexDirection: "column", gap: 3, alignItems: "center" },
+  fieldLbl: { fontFamily: F.disp, fontSize: 11, letterSpacing: 1, color: "#9aa0a6" },
+  modelRow: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "#1F2226", borderWidth: 1, borderStyle: "solid", borderColor: "#2c3036", borderRadius: 8, padding: "15px 16px", color: "#F2F0EB", fontFamily: F.disp, fontWeight: 700, fontSize: 19, letterSpacing: 1 },
+  modelRowOpen: { borderColor: "#FFB81C", borderBottomLeftRadius: 0, borderBottomRightRadius: 0 },
+  modelCount: { fontSize: 14, color: "#9aa0a6", fontFamily: F.disp, letterSpacing: 1 },
+  dropWrap: { border: "1px solid #2c3036", borderTop: "none", borderRadius: "0 0 8px 8px", padding: 8, display: "flex", flexDirection: "column", gap: 6, marginBottom: 2 },
+  paceItem: { background: "#15171A", border: "1px solid #24282d", borderRadius: 6 },
+  paceHead: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "transparent", border: "none", color: "#F2F0EB", padding: "12px 12px" },
+  paceDetail: { padding: "4px 12px 14px", borderTop: "1px solid #24282d" },
+  paceMeta: { fontSize: 12, color: "#9aa0a6", fontFamily: F.disp, letterSpacing: 1, margin: "10px 0 12px" },
+  barRow: { display: "flex", gap: 24, justifyContent: "center", alignItems: "flex-end", height: 130, padding: "0 10px" },
+  barCol: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flex: 1, maxWidth: 90, height: "100%", justifyContent: "flex-end" },
+  barTrack: { width: "100%", flex: 1, display: "flex", alignItems: "flex-end", background: "#0e1012", borderRadius: "4px 4px 0 0", overflow: "hidden" },
+  bar: { width: "100%", transition: "height .3s ease", borderRadius: "4px 4px 0 0" },
+  barLbl: { fontFamily: F.disp, fontSize: 12, letterSpacing: 1, color: "#9aa0a6" },
+  barVal: { fontFamily: F.disp, fontWeight: 700, fontSize: 18, color: "#F2F0EB" },
+  paceVerdict: { textAlign: "center", fontFamily: F.disp, fontWeight: 700, fontSize: 16, letterSpacing: 1, marginTop: 12 },
+  swRow: { display: "flex", gap: 10, alignItems: "flex-end", marginTop: 14 },
+  swBtn: { flex: 1, fontFamily: F.disp, fontWeight: 700, fontSize: 17, letterSpacing: 1, color: "#15171A", border: "none", borderRadius: 8, padding: "13px" },
   editCard: { background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 },
   editRow: { display: "flex", gap: 8, alignItems: "stretch" },
   editName: { width: "100%", background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#F2F0EB", padding: "10px 12px", fontSize: 15, outline: "none" },
   editPart: { flex: 1, minWidth: 0, background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#9aa0a6", padding: "10px 12px", fontSize: 14, fontFamily: F.disp, letterSpacing: 1, outline: "none" },
-  editMin: { width: 64, background: "#15171A", border: "1px solid #FFB81C", borderRadius: 6, color: "#FFB81C", fontFamily: F.disp, fontWeight: 700, fontSize: 17, padding: "10px 6px", textAlign: "center", outline: "none" },
+  editMin: { width: 64, background: "#15171A", borderWidth: 1, borderStyle: "solid", borderColor: "#FFB81C", borderRadius: 6, color: "#FFB81C", fontFamily: F.disp, fontWeight: 700, fontSize: 17, padding: "10px 6px", textAlign: "center", outline: "none" },
   delBox: { width: 44, background: "transparent", border: "1px solid #3a3f45", color: "#ff9ea2", fontSize: 16, borderRadius: 6 },
   board: { background: "#1F2226", border: "1px solid #2c3036", borderRadius: 10, padding: "18px 16px 14px", marginBottom: 14 },
   bigRow: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 },
@@ -740,7 +945,7 @@ const S = {
   section: { fontFamily: F.disp, fontWeight: 600, letterSpacing: 3, fontSize: 13, color: "#9aa0a6", margin: "18px 2px 8px" },
   search: { width: "100%", background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, color: "#F2F0EB", padding: "12px 14px", fontSize: 16, marginBottom: 8, outline: "none" },
   chips: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 4 },
-  chip: { fontFamily: F.disp, fontWeight: 600, letterSpacing: 1, fontSize: 14, whiteSpace: "nowrap", background: "transparent", border: "1px solid #3a3f45", color: "#9aa0a6", borderRadius: 999, padding: "7px 13px" },
+  chip: { fontFamily: F.disp, fontWeight: 600, letterSpacing: 1, fontSize: 14, whiteSpace: "nowrap", background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: "#3a3f45", color: "#9aa0a6", borderRadius: 999, padding: "7px 13px" },
   chipOn: { background: "#F2F0EB", color: "#15171A", borderColor: "#F2F0EB" },
   list: { display: "flex", flexDirection: "column", gap: 6 },
   row: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, padding: "13px 14px", color: "#F2F0EB", textAlign: "left", width: "100%" },
