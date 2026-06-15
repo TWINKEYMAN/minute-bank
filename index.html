@@ -76,15 +76,15 @@ const SEED_PARTS = {
 
 // ---------- Quick-add catalog ----------
 const CATALOG = [
-  ["All Models", "Port PDI", 15],
-  ["All Models", "Full PDI", 26.4],
-  ["All Models", "Accessory Promo Sticker", 1],
-  ["All Models", "Roadside Sticker", 1],
-  ["All Models", "Wheel Locks - Alloy", 6],
-  ["All Models", "Wheel Lock/Nut Set - Black", 24],
-  ["All Models", "Body Side Molding", 10.2],
-  ["All Models", "Door Edge Guard 4 Dr", 15],
-  ["All Models", "Door Edge Guard 2 Dr", 6],
+  ["Universal Parts", "Port PDI", 15],
+  ["Universal Parts", "Full PDI", 26.4],
+  ["Universal Parts", "Accessory Promo Sticker", 1],
+  ["Universal Parts", "Roadside Sticker", 1],
+  ["Universal Parts", "Wheel Locks - Alloy", 6],
+  ["Universal Parts", "Wheel Lock/Nut Set - Black", 24],
+  ["Universal Parts", "Body Side Molding", 10.2],
+  ["Universal Parts", "Door Edge Guard 4 Dr", 15],
+  ["Universal Parts", "Door Edge Guard 2 Dr", 6],
   ...Object.entries(SEED_PARTS).map(([p, v]) => ["Outback", v.name, v.min, p]),
   ["Forester", "Accessory Grille", 26.4],
   ["Forester", "Cargo Net", 5.4],
@@ -181,7 +181,7 @@ const CATALOG = [
   ["Solterra", "Exterior Graphics Kit", 15],
 ];
 
-const MODELS = ["Outback", "All Models", "Forester", "WRX", "Crosstrek", "Impreza", "BRZ", "Solterra"];
+const MODELS = ["Outback", "Forester", "WRX", "Crosstrek", "Impreza", "BRZ", "Solterra"];
 const STORE_KEY = "minutebank:v1";
 
 const normPart = (s) => (s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -308,11 +308,17 @@ function migrate(d) {
   }
   // Ensure every catalog item has an actual-minutes field
   d.catalog.forEach((c) => { if (c.actual === undefined) c.actual = ""; });
-  // Editable model list — seed from whatever models the catalog already uses, in MODELS order
+  // Migrate the old "All Models" label to the new "Universal Parts" bucket
+  d.catalog.forEach((c) => { if (c.model === "All Models") c.model = "Universal Parts"; });
+  // Editable model list — real models only. "All Models" (master view) and
+  // "Universal Parts" (shared installs) are permanent fixtures, not user models.
   if (!Array.isArray(d.models)) {
     const used = Array.from(new Set(d.catalog.map((c) => c.model)));
-    d.models = MODELS.filter((m) => used.includes(m)).concat(used.filter((m) => !MODELS.includes(m)));
-    if (!d.models.length) d.models = MODELS.slice();
+    const real = MODELS.filter((m) => m !== "All Models");
+    d.models = real.filter((m) => used.includes(m)).concat(used.filter((m) => !real.includes(m) && m !== "Universal Parts"));
+    if (!d.models.length) d.models = real.slice();
+  } else {
+    d.models = d.models.filter((m) => m !== "All Models" && m !== "Universal Parts");
   }
   return d;
 }
@@ -426,15 +432,19 @@ function MinuteBank() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return data.catalog.filter((c) =>
-      q ? (c.name || "").toLowerCase().includes(q) || (c.part || "").toLowerCase().includes(q) || (c.model || "").toLowerCase().includes(q) : c.model === model
+      q
+        ? (c.name || "").toLowerCase().includes(q) || (c.part || "").toLowerCase().includes(q) || (c.model || "").toLowerCase().includes(q)
+        : model === "All Models" ? true : c.model === model
     );
   }, [search, model, data.catalog]);
 
   const updateCatalogItem = (id, field, value) =>
     save({ ...data, catalog: data.catalog.map((c) => (c.id === id ? { ...c, [field]: value } : c)) });
 
-  const addCatalogItem = () =>
-    save({ ...data, catalog: [{ id: uid(), model: search ? "Outback" : model, name: "", part: "", min: "" }, ...data.catalog] });
+  const addCatalogItem = () => {
+    const m = (model === "All Models" || search) ? (data.models[0] || "Universal Parts") : model;
+    save({ ...data, catalog: [{ id: uid(), model: m, name: "", part: "", min: "", actual: "" }, ...data.catalog] });
+  };
 
   const removeCatalogItem = (id, name) => {
     if (window.confirm("Delete \"" + (name || "this install") + "\"? This only changes your list, not your logged minutes.")) {
@@ -566,11 +576,13 @@ function MinuteBank() {
           <input style={S.search} placeholder="Search installs…" value={search} onChange={(e) => setSearch(e.target.value)} />
           {!search && (
             <div style={S.chips}>
+              <button style={{ ...S.chip, ...("All Models" === model ? S.chipOn : {}) }} onClick={() => setModel("All Models")}>All Models</button>
               {data.models.map((m) => (
                 <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)}>
                   {m}
                 </button>
               ))}
+              <button style={{ ...S.chip, ...("Universal Parts" === model ? S.chipOn : {}) }} onClick={() => setModel("Universal Parts")}>Universal Parts</button>
             </div>
           )}
           <div style={S.list}>
@@ -646,17 +658,27 @@ function MinuteBank() {
         <React.Fragment>
           <div style={S.section}>MODELS</div>
           <div style={S.chips}>
+            <button style={{ ...S.chip, ...("All Models" === model ? S.chipOn : {}) }} onClick={() => setModel("All Models")}>All Models</button>
             {data.models.map((m) => (
               <button key={m} style={{ ...S.chip, ...(m === model ? S.chipOn : {}) }} onClick={() => setModel(m)} onDoubleClick={() => renameModel(m)}>
                 {m}
               </button>
             ))}
+            <button style={{ ...S.chip, ...("Universal Parts" === model ? S.chipOn : {}) }} onClick={() => setModel("Universal Parts")}>Universal Parts</button>
             <button style={{ ...S.chip, borderStyle: "dashed", color: "#FFB81C" }} onClick={addModel}>+ MODEL</button>
           </div>
-          <div style={S.modelTools}>
-            <button style={S.smallBtn} onClick={() => renameModel(model)}>Rename “{model}”</button>
-            <button style={{ ...S.smallBtn, color: "#ff9ea2", borderColor: "#5a3034" }} onClick={() => removeModel(model)}>Delete model</button>
-          </div>
+          {model !== "All Models" && model !== "Universal Parts" && (
+            <div style={S.modelTools}>
+              <button style={S.smallBtn} onClick={() => renameModel(model)}>Rename “{model}”</button>
+              <button style={{ ...S.smallBtn, color: "#ff9ea2", borderColor: "#5a3034" }} onClick={() => removeModel(model)}>Delete model</button>
+            </div>
+          )}
+          {model === "All Models" && (
+            <div style={S.logMeta}>Master list — every install across every model. Read here, edit anywhere.</div>
+          )}
+          {model === "Universal Parts" && (
+            <div style={S.logMeta}>Installs that apply to every vehicle — stickers, PDIs, and the like. These show up under every model's Pace and Quick Add too.</div>
+          )}
 
           <div style={S.section}>{model.toUpperCase()} INSTALLS</div>
           <button style={{ ...S.scanBtn, fontSize: 17 }} onClick={addCatalogItem}>+ ADD INSTALL</button>
@@ -667,12 +689,26 @@ function MinuteBank() {
           <div style={{ ...S.list, marginTop: 8 }}>
             {filtered.map((c) => (
               <div key={c.id} style={S.editCard}>
-                <input
-                  style={S.editName}
-                  placeholder="Install name"
-                  value={c.name}
-                  onChange={(e) => updateCatalogItem(c.id, "name", e.target.value)}
-                />
+                <div style={S.editRow}>
+                  <input
+                    style={S.editName}
+                    placeholder="Install name"
+                    value={c.name}
+                    onChange={(e) => updateCatalogItem(c.id, "name", e.target.value)}
+                  />
+                  {model === "All Models" && (
+                    <select
+                      style={S.modelSelect}
+                      value={c.model}
+                      onChange={(e) => updateCatalogItem(c.id, "model", e.target.value)}
+                    >
+                      <option value="Universal Parts">Universal</option>
+                      {data.models.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
                 <div style={S.editRow}>
                   <input
                     style={S.editPart}
@@ -712,8 +748,10 @@ function MinuteBank() {
         <React.Fragment>
           <div style={S.section}>PACE — YOUR SPEED VS. STANDARD</div>
           <div style={S.list}>
-            {data.models.map((m) => {
-              const installs = data.catalog.filter((c) => c.model === m);
+            {["All Models", ...data.models].map((m) => {
+              const installs = m === "All Models"
+                ? data.catalog
+                : data.catalog.filter((c) => c.model === m || c.model === "Universal Parts");
               const isOpen = openModel === m;
               return (
                 <div key={m}>
@@ -835,6 +873,29 @@ function MinuteBank() {
             {review.dupVin && (
               <div style={S.warn}>⚠ You already logged installs for this VIN. Double-check before confirming.</div>
             )}
+            <div style={S.pdiRow}>
+              {data.catalog
+                .filter((c) => c.model === "Universal Parts" && /PDI/i.test(c.name))
+                .map((c) => {
+                  const inReview = review.items.some((i) => i.pdiId === c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      style={{ ...S.pdiBtn, ...(inReview ? S.pdiBtnOn : {}) }}
+                      onClick={() =>
+                        setReview({
+                          ...review,
+                          items: inReview
+                            ? review.items.filter((i) => i.pdiId !== c.id)
+                            : [...review.items, { key: uid(), pdiId: c.id, part: c.part, desc: c.name, name: c.name, min: parseFloat(c.min) || 0, known: true, checked: true }],
+                        })
+                      }
+                    >
+                      {inReview ? "✓ " : "+ "}{c.name} (+{fmt(parseFloat(c.min) || 0)})
+                    </button>
+                  );
+                })}
+            </div>
             <div style={{ overflowY: "auto", flex: 1 }}>
               {review.items.map((it) => (
                 <div key={it.key} style={{ ...S.revRow, opacity: it.checked ? 1 : 0.45 }}>
@@ -927,7 +988,8 @@ const S = {
   swBtn: { flex: 1, fontFamily: F.disp, fontWeight: 700, fontSize: 17, letterSpacing: 1, color: "#15171A", border: "none", borderRadius: 8, padding: "13px" },
   editCard: { background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 },
   editRow: { display: "flex", gap: 8, alignItems: "stretch" },
-  editName: { width: "100%", background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#F2F0EB", padding: "10px 12px", fontSize: 15, outline: "none" },
+  editName: { flex: 1, minWidth: 0, background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#F2F0EB", padding: "10px 12px", fontSize: 15, outline: "none" },
+  modelSelect: { background: "#15171A", borderWidth: 1, borderStyle: "solid", borderColor: "#3a3f45", borderRadius: 6, color: "#FFB81C", fontFamily: F.disp, fontWeight: 600, letterSpacing: 1, fontSize: 13, padding: "0 8px", maxWidth: 110 },
   editPart: { flex: 1, minWidth: 0, background: "#15171A", border: "1px solid #2c3036", borderRadius: 6, color: "#9aa0a6", padding: "10px 12px", fontSize: 14, fontFamily: F.disp, letterSpacing: 1, outline: "none" },
   editMin: { width: 64, background: "#15171A", borderWidth: 1, borderStyle: "solid", borderColor: "#FFB81C", borderRadius: 6, color: "#FFB81C", fontFamily: F.disp, fontWeight: 700, fontSize: 17, padding: "10px 6px", textAlign: "center", outline: "none" },
   delBox: { width: 44, background: "transparent", border: "1px solid #3a3f45", color: "#ff9ea2", fontSize: 16, borderRadius: 6 },
@@ -942,6 +1004,9 @@ const S = {
   scanBtn: { fontFamily: F.disp, fontWeight: 700, fontSize: 19, letterSpacing: 2, background: "#FFB81C", color: "#15171A", border: "none", borderRadius: 10, padding: "16px", width: "100%", marginBottom: 8 },
   err: { background: "#3a1d1f", border: "1px solid #E5484D", color: "#ff9ea2", borderRadius: 8, padding: "10px 12px", fontSize: 14, marginBottom: 8 },
   warn: { background: "#3a2f12", border: "1px solid #FFB81C", color: "#ffd87a", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "0 0 10px" },
+  pdiRow: { display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" },
+  pdiBtn: { fontFamily: F.disp, fontWeight: 700, letterSpacing: 1, fontSize: 14, background: "transparent", borderWidth: 1, borderStyle: "dashed", borderColor: "#FFB81C", color: "#FFB81C", borderRadius: 999, padding: "8px 14px" },
+  pdiBtnOn: { background: "#FFB81C", borderStyle: "solid", color: "#15171A" },
   section: { fontFamily: F.disp, fontWeight: 600, letterSpacing: 3, fontSize: 13, color: "#9aa0a6", margin: "18px 2px 8px" },
   search: { width: "100%", background: "#1F2226", border: "1px solid #2c3036", borderRadius: 8, color: "#F2F0EB", padding: "12px 14px", fontSize: 16, marginBottom: 8, outline: "none" },
   chips: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 4 },
