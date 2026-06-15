@@ -342,7 +342,7 @@ async function extractSheetOCR(dataUrl, partList, onProgress) {
       items.push({ key: uid(), part: tok, name: tok, min: "", known: false, checked: false });
     }
   }
-  return { model, vin, items };
+  return { model, vin, items, rawText: fullText };
 }
 
 function migrate(d) {
@@ -457,7 +457,13 @@ function MinuteBank() {
       const vin = (result.vin || "").trim();
       const dupVin = !!vin && Object.values(data.days).some((d) => d.some((en) => en.vin === vin));
       const items = result.items;
-      if (!items.length) throw new Error("No parts found on that photo. Try a straighter, closer shot.");
+      if (!items.length) {
+        const snippet = (result.rawText || "").replace(/\s+/g, " ").trim().slice(0, 220);
+        throw new Error(
+          "No part numbers matched. " +
+          (snippet ? "OCR read: \u201c" + snippet + (result.rawText.length > 220 ? "\u2026" : "") + "\u201d" : "OCR found no text at all \u2014 check lighting/focus.")
+        );
+      }
       setReview({ model: result.model || "", vin, dupVin, items });
     } catch (err) {
       setScanErr(err.message || "Scan failed. Check connection and try again.");
@@ -1058,7 +1064,7 @@ const S = {
   tick: { position: "absolute", top: 0, bottom: 0, width: 1, background: "#15171A" },
   boardFoot: { display: "flex", justifyContent: "space-between", marginTop: 8, fontFamily: F.disp, fontWeight: 600, fontSize: 15, letterSpacing: 1, color: "#F2F0EB" },
   scanBtn: { fontFamily: F.disp, fontWeight: 700, fontSize: 19, letterSpacing: 2, background: "#FFB81C", color: "#15171A", border: "none", borderRadius: 10, padding: "16px", width: "100%", marginBottom: 8 },
-  err: { background: "#3a1d1f", border: "1px solid #E5484D", color: "#ff9ea2", borderRadius: 8, padding: "10px 12px", fontSize: 14, marginBottom: 8 },
+  err: { background: "#3a1d1f", border: "1px solid #E5484D", color: "#ff9ea2", borderRadius: 8, padding: "10px 12px", fontSize: 14, marginBottom: 8, wordBreak: "break-word", lineHeight: 1.4 },
   warn: { background: "#3a2f12", border: "1px solid #FFB81C", color: "#ffd87a", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "0 0 10px" },
   pdiRow: { display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" },
   pdiBtn: { fontFamily: F.disp, fontWeight: 700, letterSpacing: 1, fontSize: 14, background: "transparent", borderWidth: 1, borderStyle: "dashed", borderColor: "#FFB81C", color: "#FFB81C", borderRadius: 999, padding: "8px 14px" },
