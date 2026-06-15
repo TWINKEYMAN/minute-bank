@@ -227,7 +227,7 @@ function readExifOrientation(buf) {
   return 1;
 }
 
-async function fileToDataUrl(file, maxDim = 2000) {
+async function loadCorrectedImage(file, maxDim = 2000) {
   const buf = await new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result);
@@ -247,7 +247,6 @@ async function fileToDataUrl(file, maxDim = 2000) {
   const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
   const sw = Math.round(img.width * scale);
   const sh = Math.round(img.height * scale);
-  // Orientations 5-8 involve a 90° swap, so the canvas dimensions flip too.
   const swapDims = orientation >= 5;
   const c = document.createElement("canvas");
   c.width = swapDims ? sh : sw;
@@ -263,13 +262,48 @@ async function fileToDataUrl(file, maxDim = 2000) {
     case 6: ctx.transform(0, 1, -1, 0, sh, 0); break;
     case 7: ctx.transform(0, -1, -1, 0, sh, sw); break;
     case 8: ctx.transform(0, -1, 1, 0, 0, sw); break;
-    default: break; // 1: no transform needed
+    default: break; // 1 or unrecognized: no transform
   }
 
   // grayscale + mild contrast boost helps OCR on photos
   ctx.filter = "grayscale(1) contrast(1.25)";
   ctx.drawImage(img, 0, 0, sw, sh);
-  return c.toDataURL("image/jpeg", 0.9);
+  return c;
+}
+
+// Return [0°, 90°, 180°, 270°] rotated versions of a canvas as data URLs.
+// EXIF tags lie or get stripped often enough that trying all four and picking
+// the one OCR can actually read is more reliable than trusting the tag alone.
+function rotationVariants(srcCanvas) {
+  const variants = [];
+  for (const deg of [0, 90, 180, 270]) {
+    const swap = deg === 90 || deg === 270;
+    const c = document.createElement("canvas");
+    c.width = swap ? srcCanvas.height : srcCanvas.width;
+    c.height = swap ? srcCanvas.width : srcCanvas.height;
+    const ctx = c.getContext("2d");
+    switch (deg) {
+      case 90: ctx.transform(0, 1, -1, 0, c.width, 0); break;
+      case 180: ctx.transform(-1, 0, 0, -1, c.width, c.height); break;
+      case 270: ctx.transform(0, -1, 1, 0, 0, c.height); break;
+      default: break;
+    }
+    ctx.drawImage(srcCanvas, 0, 0);
+    variants.push({ deg, dataUrl: c.toDataURL("image/jpeg", 0.9) });
+  }
+  return variants;
+}
+
+// Quick score: how many tokens in this text look like real Subaru part
+// numbers or readable words? Used to pick the best-oriented OCR pass.
+function ocrScore(text) {
+  const tokens = (text || "").toUpperCase().match(/[A-Z0-9]{3,14}/g) || [];
+  let score = 0;
+  for (const t of tokens) {
+    if (/^[A-Z]\d{3}[A-Z]{3}\d{3}$/.test(t) || /^[A-Z]\d{4}[A-Z]{2}\d{3}$/.test(t) || /^MSA[A-Z0-9]{6,8}$/.test(t)) score += 5;
+    else if (/^[A-Z]{3,}$/.test(t)) score += 1; // plausible English word
+  }
+  return score;
 }
 
 // OCR confuses these character pairs; map BOTH the dictionary and the
@@ -291,13 +325,26 @@ async function getOcrWorker() {
 
 const MODEL_WORDS = ["OUTBACK", "FORESTER", "CROSSTREK", "IMPREZA", "WRX", "BRZ", "SOLTERRA", "ASCENT", "LEGACY"];
 
-async function extractSheetOCR(dataUrl, partList, onProgress) {
-  _ocrProgress = onProgress;
+async function extractSheetOCR(srcCanvas, partList, onProgress) {
   const worker = await getOcrWorker();
-  const { data } = await worker.recognize(dataUrl);
+  const variants = rotationVariants(srcCanvas);
+
+  // Quick pass on all 4 orientations (sparse text detection is faster) to find the winner.
+  let best = null;
+  for (let i = 0; i < variants.length; i++) {
+    if (onProgress) onProgress(Math.round((i / variants.length) * 50));
+    const { data } = await worker.recognize(variants[i].dataUrl);
+    const score = ocrScore(data.text);
+    if (!best || score > best.score) best = { ...variants[i], score, text: data.text };
+    if (best.score >= 25) break; // clearly found the right orientation, stop early
+  }
+
+  _ocrProgress = onProgress;
+  // Final pass on the winning orientation for the cleanest possible text.
+  const { data } = await worker.recognize(best.dataUrl);
   _ocrProgress = null;
 
-  const fullText = (data.text || "").toUpperCase();
+  const fullText = (data.text || best.text || "").toUpperCase();
   const lines = fullText.split("\n").map((l) => l.trim()).filter(Boolean);
 
   // VIN: 17 chars, no I/O/Q — search line by line, prefer Subaru "JF" prefix
@@ -397,6 +444,7 @@ function MinuteBank() {
   const [scanning, setScanning] = useState(false);
   const [scanProg, setScanProg] = useState(0);
   const [scanErr, setScanErr] = useState("");
+  const [scanDebugImg, setScanDebugImg] = useState(null);
   const [review, setReview] = useState(null);
   const [toast, setToast] = useState("");
   // Pace state
@@ -451,14 +499,16 @@ function MinuteBank() {
     setScanning(true);
     setScanProg(0);
     setScanErr("");
+    setScanDebugImg(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
-      const result = await extractSheetOCR(dataUrl, data.catalog, setScanProg);
+      const canvas = await loadCorrectedImage(file);
+      const result = await extractSheetOCR(canvas, data.catalog, setScanProg);
       const vin = (result.vin || "").trim();
       const dupVin = !!vin && Object.values(data.days).some((d) => d.some((en) => en.vin === vin));
       const items = result.items;
       if (!items.length) {
         const snippet = (result.rawText || "").replace(/\s+/g, " ").trim().slice(0, 220);
+        setScanDebugImg(dataUrl);
         throw new Error(
           "No part numbers matched. " +
           (snippet ? "OCR read: \u201c" + snippet + (result.rawText.length > 220 ? "\u2026" : "") + "\u201d" : "OCR found no text at all \u2014 check lighting/focus.")
